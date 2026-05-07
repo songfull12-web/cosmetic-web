@@ -4,92 +4,93 @@ import io
 import pdfplumber
 import re
 
-st.set_page_config(page_title="비스타릿 RA 통합 분석 시스템", layout="wide")
+st.set_page_config(page_title="비스타릿 RA 정밀 스크리너", layout="wide")
 
-# 규제 DB 로드
 @st.cache_data
 def load_db():
     try:
+        # DB 로드 및 성분명 표준화 (공백 제거, 대문자 변환)
         df = pd.read_csv('regulations.csv')
-        df['Ingredient'] = df['Ingredient'].astype(str).str.strip()
+        df['Ingredient_Clean'] = df['Ingredient'].astype(str).str.upper().str.replace(r'[^A-Z0-9]', '', regex=True)
         return df
     except:
-        return pd.DataFrame(columns=["Ingredient", "EU_Status", "ASEAN_Status", "MiddleEast_Status", "Source"])
+        return pd.DataFrame(columns=["Ingredient", "EU_Status", "ASEAN_Status", "MiddleEast_Status"])
 
 db = load_db()
 
-st.title("🧪 RA 지능형 통합 분석기 v10.0")
-st.info("PDF/Excel의 복잡한 양식에서 성분명, CAS, 함량을 똑똑하게 분류합니다.")
+st.title("🛡️ 비스타릿 RA 정밀 성분 분석기 v11.0")
+st.error("주의: 주소, 업체명, 서명 등 성분이 아닌 데이터는 AI가 자동으로 제거합니다.")
 
-uploaded_file = st.file_uploader("B.O.M 파일 업로드 (PDF, XLSX, JPG, PNG)", type=["pdf", "xlsx", "jpg", "png"])
+uploaded_file = st.file_uploader("B.O.M(PDF/Excel) 업로드", type=["pdf", "xlsx", "jpg", "png"])
 
 raw_text = ""
 if uploaded_file:
-    with st.spinner('파일의 모든 데이터를 안전하게 읽고 있습니다...'):
-        try:
-            if uploaded_file.name.endswith('.pdf'):
-                with pdfplumber.open(uploaded_file) as pdf:
-                    # PDF의 줄바꿈과 표 구조를 최대한 살려서 추출
-                    raw_text = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
-            elif uploaded_file.name.endswith('.xlsx'):
-                df_ex = pd.read_excel(uploaded_file).fillna('')
-                # 엑셀 에러 방지용 강제 문자열 변환
-                raw_text = "\n".join([" | ".join(map(str, row)) for row in df_ex.values])
-            st.success(f"✅ '{uploaded_file.name}' 분석 성공!")
-        except Exception as e:
-            st.error(f"⚠️ 파일 읽기 오류: {e}")
+    try:
+        if uploaded_file.name.endswith('.pdf'):
+            with pdfplumber.open(uploaded_file) as pdf:
+                raw_text = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
+        elif uploaded_file.name.endswith('.xlsx'):
+            df_ex = pd.read_excel(uploaded_file).fillna('')
+            raw_text = "\n".join([" ".join(map(str, row)) for row in df_ex.values])
+        st.success("✅ 파일 데이터 로드 완료")
+    except Exception as e:
+        st.error(f"파일 읽기 실패: {e}")
 
-# 🧠 핵심 로직: 성분명, CAS, 함량 분리 필터
-def refined_parser(text):
-    # 1. CAS 번호 패턴 추출 (00-00-0)
-    cas_list = re.findall(r'\d{2,7}-\d{2}-\d', text)
-    # 2. 함량(%) 패턴 추출 및 제거
-    percentages = re.findall(r'\d+\.?\d*\s?%', text)
-    # 3. 노이즈 제거 (숫자, 특수기호, CAS번호 등 삭제하여 INCI만 남김)
-    name_cleaned = re.sub(r'\d{2,7}-\d{2}-\d', '', text) # CAS 제거
-    name_cleaned = re.sub(r'\d+\.?\d*\s?%', '', name_cleaned) # 함량 제거
-    # 한글 및 영문 성분명 이외의 잡다한 기호 정리
-    name_cleaned = re.sub(r'[^a-zA-Z가-힣\s\-\,]', '', name_cleaned).strip()
+# 🔍 RA 전용 정밀 필터링 함수
+def ra_expert_filter(line):
+    # 1. 성분이 아님이 확실한 단어들 (제거 목록)
+    ignore_keywords = ['SIGNED', 'TOTAL', 'PAGE', 'CUSTOMER', 'PRODUCT NAME', 'ADDRESS', 'TEL', 'FAX', 'INGREDIENT %', 'DATE']
+    upper_line = line.upper()
+    if any(kw in upper_line for kw in ignore_keywords):
+        return None
     
-    # 성분명이 여러 개 섞인 경우(복합원료) 첫 번째 핵심 명칭 반환
-    main_name = name_cleaned.split(',')[0].strip() if ',' in name_cleaned else name_cleaned
-    return main_name, ", ".join(cas_list), ", ".join(percentages)
+    # 2. CAS 번호 및 함량 추출
+    cas = ", ".join(re.findall(r'\d{2,7}-\d{2}-\d', line))
+    
+    # 3. 영문 INCI명 추출 (한글이나 잡다한 텍스트 제외하고 순수 영문 성분만)
+    inci_match = re.search(r'[a-zA-Z\s\-\,]{5,}', line) # 5자 이상의 연속된 영문/공백
+    if not inci_match: return None
+    
+    inci_name = inci_match.group().strip()
+    return {"name": inci_name, "cas": cas, "raw": line}
 
-st.subheader("📋 추출 데이터 보정")
-edit_text = st.text_area("AI가 추출한 원시 데이터입니다. 성분별로 줄을 나눠주시면 더 정확합니다.", value=raw_text, height=250)
+st.subheader("📋 실무자 검토 영역")
+edit_text = st.text_area("분석된 내용입니다. 여기서 성분이 아닌 줄은 과감히 지워주세요.", value=raw_text, height=250)
 
-if st.button("🚀 글로벌 규제 통합 스크리닝 시작"):
+if st.button("🚨 정밀 규제 스크리닝 실행"):
     if edit_text:
-        lines = [l.strip() for l in edit_text.split('\n') if len(l.strip()) > 5]
+        lines = edit_text.split('\n')
         results = []
         
         for line in lines:
-            ing_name, cas, content = refined_parser(line)
-            if not ing_name or len(ing_name) < 3: continue
+            parsed = ra_expert_filter(line)
+            if not parsed: continue
             
-            # DB 대조 (부분 일치 검색 강화)
-            match = db[db['Ingredient'].str.contains(re.escape(ing_name[:15]), case=False, na=False)]
+            # DB와 비교 (매우 엄격하게 대조)
+            search_key = re.sub(r'[^A-Z0-9]', '', parsed['name'].upper())
+            # DB의 성분명과 정확히 일치하거나 포함되는지 확인
+            match = db[db['Ingredient_Clean'].str.contains(search_key, na=False) | 
+                       (db['Ingredient_Clean'] == search_key)]
             
             if not match.empty:
                 res = match.iloc[0].to_dict()
-                res['입력성분(INCI)'] = ing_name
-                res['CAS No.'] = cas
-                res['함량'] = content
-                res['판단'] = "⚠️ 규제대상"
+                res['검토성분'] = parsed['name']
+                res['CAS'] = parsed['cas']
+                res['상태'] = "❌ 금지/제한성분"
+                results.append(res)
             else:
-                res = {'입력성분(INCI)': ing_name, 'CAS No.': cas, '함량': content, '판단': "✅ 특이사항 없음"}
-                for col in ["EU_Status", "ASEAN_Status", "MiddleEast_Status"]: res[col] = "-"
-            
-            results.append(res)
+                # DB에 없는 경우 '기타 성분'으로 분류 (결과창을 깨끗하게 유지)
+                pass 
 
-        # 결과 테이블 출력
-        st.divider()
-        st.subheader("🔍 국가별 규제 대조 결과")
-        final_df = pd.DataFrame(results)
-        st.dataframe(final_df, use_container_width=True)
+        if results:
+            st.warning(f"⚠️ 규제 DB와 일치하는 성분이 {len(results)}건 발견되었습니다.")
+            st.dataframe(pd.DataFrame(results)[['검토성분', 'CAS', '상태', 'EU_Status', 'ASEAN_Status', 'MiddleEast_Status']], use_container_width=True)
+        else:
+            st.success("✅ 규제 대상 성분이 발견되지 않았습니다. (DB 대조 결과)")
 
-        # 엑셀 다운로드
+        # 전체 리스트 엑셀 저장용
+        full_df = pd.DataFrame(results)
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            final_df.to_excel(writer, index=False, sheet_name='Report')
-        st.download_button("📥 결과 보고서(Excel) 다운로드", output.getvalue(), "Regulatory_Report.xlsx")
+            full_df.to_excel(writer, index=False, sheet_name='Report')
+        st.download_button("📥 최종 보고서 다운로드", output.getvalue(), "RA_Analysis_Report.xlsx")
