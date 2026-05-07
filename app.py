@@ -4,8 +4,9 @@ import io
 import pdfplumber
 import re
 
-st.set_page_config(page_title="비스타릿 RA 지능형 스크리너", layout="wide")
+st.set_page_config(page_title="비스타릿 RA 통합 분석 시스템", layout="wide")
 
+# 규제 DB 로드
 @st.cache_data
 def load_db():
     try:
@@ -13,70 +14,82 @@ def load_db():
         df['Ingredient'] = df['Ingredient'].astype(str).str.strip()
         return df
     except:
-        return pd.DataFrame(columns=["Ingredient", "EU_Status", "ASEAN_Status", "MiddleEast_Status"])
+        return pd.DataFrame(columns=["Ingredient", "EU_Status", "ASEAN_Status", "MiddleEast_Status", "Source"])
 
 db = load_db()
 
-st.title("📑 RA 지능형 성분 분석기 v8.0")
-st.info("복합 성분 및 다중 CAS 번호가 포함된 다양한 양식의 B.O.M을 센스 있게 분석합니다.")
+st.title("🧪 RA 지능형 통합 분석기 v10.0")
+st.info("PDF/Excel의 복잡한 양식에서 성분명, CAS, 함량을 똑똑하게 분류합니다.")
 
-uploaded_file = st.file_uploader("B.O.M(PDF/Excel) 업로드", type=["pdf", "xlsx", "jpg", "png"])
+uploaded_file = st.file_uploader("B.O.M 파일 업로드 (PDF, XLSX, JPG, PNG)", type=["pdf", "xlsx", "jpg", "png"])
 
 raw_text = ""
 if uploaded_file:
-    with st.spinner('문서를 지능적으로 분석 중...'):
-        if uploaded_file.name.endswith('.pdf'):
-            with pdfplumber.open(uploaded_file) as pdf:
-                raw_text = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
-        elif uploaded_file.name.endswith('.xlsx'):
-            df_ex = pd.read_excel(uploaded_file)
-            raw_text = df_ex.astype(str).apply(lambda x: ' | '.join(x), axis=1).str.cat(sep='\n')
-    st.success("✅ 파일 분석 완료!")
+    with st.spinner('파일의 모든 데이터를 안전하게 읽고 있습니다...'):
+        try:
+            if uploaded_file.name.endswith('.pdf'):
+                with pdfplumber.open(uploaded_file) as pdf:
+                    # PDF의 줄바꿈과 표 구조를 최대한 살려서 추출
+                    raw_text = "\n".join([p.extract_text() for p in pdf.pages if p.extract_text()])
+            elif uploaded_file.name.endswith('.xlsx'):
+                df_ex = pd.read_excel(uploaded_file).fillna('')
+                # 엑셀 에러 방지용 강제 문자열 변환
+                raw_text = "\n".join([" | ".join(map(str, row)) for row in df_ex.values])
+            st.success(f"✅ '{uploaded_file.name}' 분석 성공!")
+        except Exception as e:
+            st.error(f"⚠️ 파일 읽기 오류: {e}")
 
-# 🧠 지능형 성분 추출 함수 (복합성분/다중CAS 대응)
-def smart_parser(text):
-    # 1. 함량(%) 및 불필요 기호 제거
-    cleaned = re.sub(r'\d+\.?\d*\s?%', '', text) 
-    # 2. CAS 번호 패턴(00-00-0) 추출만 하고 성분명 검색에서는 제외
-    cas_numbers = re.findall(r'\d{2,7}-\d{2}-\d', cleaned)
-    # 3. 영문 INCI 네임 위주로 추출 (대문자, 공백, 특수문자 포함된 긴 명칭)
-    # 한글과 영문이 섞인 경우 영문 위주로 필터링
-    name_only = re.sub(r'[^a-zA-Z\s\-\,]', '', cleaned).strip()
-    return name_only, cas_numbers
+# 🧠 핵심 로직: 성분명, CAS, 함량 분리 필터
+def refined_parser(text):
+    # 1. CAS 번호 패턴 추출 (00-00-0)
+    cas_list = re.findall(r'\d{2,7}-\d{2}-\d', text)
+    # 2. 함량(%) 패턴 추출 및 제거
+    percentages = re.findall(r'\d+\.?\d*\s?%', text)
+    # 3. 노이즈 제거 (숫자, 특수기호, CAS번호 등 삭제하여 INCI만 남김)
+    name_cleaned = re.sub(r'\d{2,7}-\d{2}-\d', '', text) # CAS 제거
+    name_cleaned = re.sub(r'\d+\.?\d*\s?%', '', name_cleaned) # 함량 제거
+    # 한글 및 영문 성분명 이외의 잡다한 기호 정리
+    name_cleaned = re.sub(r'[^a-zA-Z가-힣\s\-\,]', '', name_cleaned).strip()
+    
+    # 성분명이 여러 개 섞인 경우(복합원료) 첫 번째 핵심 명칭 반환
+    main_name = name_cleaned.split(',')[0].strip() if ',' in name_cleaned else name_cleaned
+    return main_name, ", ".join(cas_list), ", ".join(percentages)
 
-st.subheader("📋 분석된 원료 그룹")
-edit_text = st.text_area("텍스트가 엉망이라면 성분 단위로 줄을 나눠주세요.", value=raw_text, height=250)
+st.subheader("📋 추출 데이터 보정")
+edit_text = st.text_area("AI가 추출한 원시 데이터입니다. 성분별로 줄을 나눠주시면 더 정확합니다.", value=raw_text, height=250)
 
-if st.button("🚀 지능형 규제 스크리닝 시작"):
+if st.button("🚀 글로벌 규제 통합 스크리닝 시작"):
     if edit_text:
         lines = [l.strip() for l in edit_text.split('\n') if len(l.strip()) > 5]
         results = []
         
         for line in lines:
-            ing_name, cas_list = smart_parser(line)
-            if not ing_name: continue
+            ing_name, cas, content = refined_parser(line)
+            if not ing_name or len(ing_name) < 3: continue
             
-            # DB 검색 시 성분명의 앞부분 핵심 키워드 활용
-            search_keywords = [k.strip() for k in ing_name.split(',') if len(k.strip()) > 3]
+            # DB 대조 (부분 일치 검색 강화)
+            match = db[db['Ingredient'].str.contains(re.escape(ing_name[:15]), case=False, na=False)]
             
-            found = False
-            for kw in search_keywords:
-                match = db[db['Ingredient'].str.contains(re.escape(kw), case=False, na=False)]
-                if not match.empty:
-                    res = match.iloc[0].to_dict()
-                    res['추출된 성분명'] = ing_name
-                    res['포함된 CAS'] = ", ".join(cas_list)
-                    res['판단'] = "⚠️ 규제대상"
-                    results.append(res)
-                    found = True
-                    break
+            if not match.empty:
+                res = match.iloc[0].to_dict()
+                res['입력성분(INCI)'] = ing_name
+                res['CAS No.'] = cas
+                res['함량'] = content
+                res['판단'] = "⚠️ 규제대상"
+            else:
+                res = {'입력성분(INCI)': ing_name, 'CAS No.': cas, '함량': content, '판단': "✅ 특이사항 없음"}
+                for col in ["EU_Status", "ASEAN_Status", "MiddleEast_Status"]: res[col] = "-"
             
-            if not found:
-                results.append({
-                    '추출된 성분명': ing_name,
-                    '포함된 CAS': ", ".join(cas_list),
-                    '판단': "✅ 특이사항 없음",
-                    'EU_Status': "-", 'ASEAN_Status': "-", 'MiddleEast_Status': "-", 'Source': "N/A"
-                })
+            results.append(res)
 
-        st.dataframe(pd.DataFrame(results), use_container_width=True)
+        # 결과 테이블 출력
+        st.divider()
+        st.subheader("🔍 국가별 규제 대조 결과")
+        final_df = pd.DataFrame(results)
+        st.dataframe(final_df, use_container_width=True)
+
+        # 엑셀 다운로드
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            final_df.to_excel(writer, index=False, sheet_name='Report')
+        st.download_button("📥 결과 보고서(Excel) 다운로드", output.getvalue(), "Regulatory_Report.xlsx")
